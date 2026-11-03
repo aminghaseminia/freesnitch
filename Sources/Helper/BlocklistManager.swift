@@ -40,16 +40,26 @@ final class BlocklistManager: @unchecked Sendable {
                 group.addTask { (list, await self.fetch(list)) }
             }
             for await (list, downloaded) in group {
-                // A list that failed to download must not be recorded as a
-                // successful empty one, or Settings reports "0 entries,
-                // updated just now" for a source that is simply gone.
-                guard var set = downloaded else { continue }
+                let edits = store.blocklistEdits(id: list.id)
+                var set: Set<String>
+                if let downloaded {
+                    set = downloaded
+                } else {
+                    // A failed refresh keeps what the last successful download
+                    // installed. Dropping it made a single unreachable feed -
+                    // or every feed during an outage - silently turn blocking
+                    // off, and the merged set below is the only thing the DNS
+                    // proxy consults.
+                    set = self.store.blocklistDomainSet(blocklistID: list.id)
+                    PSLog.error(PSLog.dns,
+                                "blocklist \(list.name) could not be refreshed; keeping \(set.count) stored entries")
+                }
                 // Hand edits are reapplied after every download, which is the
                 // whole reason they are stored apart from the entries (#97).
-                let edits = store.blocklistEdits(id: list.id)
                 set.formUnion(edits.added)
                 set.subtract(edits.removed)
                 merged.formUnion(set)
+                guard downloaded != nil else { continue }
                 var updated = list
                 updated.entryCount = set.count
                 updated.lastUpdated = Date()
@@ -98,16 +108,44 @@ final class BlocklistManager: @unchecked Sendable {
         // A hand-written list has no source. It has not failed to download;
         // there is nothing to download, and its entries are its edits (#97).
         if list.url.trimmingCharacters(in: .whitespaces).isEmpty { return [] }
-        guard let url = URL(string: list.url) else { return nil }
+        let url: URL
+        do {
+            // Re-validate here as well as in the GUI store: a legacy or
+            // directly inserted database row must not be able to turn the root
+            // helper into a cleartext fetcher.
+            url = try BlocklistURLValidator.validate(list.url)
+        } catch {
+            PSLog.error(PSLog.dns, "blocklist \(list.name) has an invalid URL: \(error.localizedDescription)")
+            return nil
+        }
+        guard !Self.isForbiddenFetchHost(url.host) else {
+            PSLog.error(PSLog.dns,
+                        "SECURITY: refusing to fetch blocklist \(list.name) from a loopback or link-local host")
+            return nil
+        }
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("FreeSnitch/0.1", forHTTPHeaderField: "User-Agent")
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            // `data(for:)` allocates the complete body before any check can
+            // run. AsyncBytes lets the byte ceiling stop a hostile or corrupt
+            // feed instead of letting it exhaust the helper that also serves
+            // DNS and holds the firewall rules.
+            let (bytes, response) = try await URLSession.shared.bytes(for: req)
             // Without this check an error page parses into junk "domains":
             // GitHub's 404 body alone yields an entry called "Found".
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 PSLog.error(PSLog.dns, "blocklist \(list.name) returned HTTP \(http.statusCode)")
                 return nil
+            }
+            var data = Data()
+            data.reserveCapacity(1 << 20)
+            for try await byte in bytes {
+                guard data.count < Self.maximumFeedBytes else {
+                    PSLog.error(PSLog.dns,
+                                "blocklist \(list.name) is larger than the \(Self.maximumFeedBytes) byte limit")
+                    return nil
+                }
+                data.append(byte)
             }
             guard let text = String(data: data, encoding: .utf8) else { return nil }
             return parse(text)
@@ -117,16 +155,39 @@ final class BlocklistManager: @unchecked Sendable {
         }
     }
 
+    /// A HOSTS list is text; 32 MB is far beyond any real one and keeps a
+    /// hostile feed from becoming an unbounded allocation.
+    static let maximumFeedBytes = 32 * 1024 * 1024
+
+    /// The helper fetches as root, so it must not be pointed at the machine's
+    /// own services or the cloud metadata address.
+    private static func isForbiddenFetchHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased(), !host.isEmpty else { return true }
+        if host == "localhost" || host.hasSuffix(".localhost") { return true }
+        if host == "::1" || host == "0.0.0.0" { return true }
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4 else { return false }
+        if octets[0] == 127 { return true }
+        if octets[0] == 169 && octets[1] == 254 { return true }
+        return false
+    }
+
     private func parse(_ text: String) -> Set<String> {
         var out: Set<String> = []
         out.reserveCapacity(50_000)
         for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
+            // Trimming newlines as well keeps CRLF lists usable: a trailing
+            // "\r" used to survive into the entry, so a whole Windows-format
+            // feed loaded with zero effective matches.
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             // "[Adblock Plus]" heads every Adblock-syntax list.
             if line.isEmpty || line.hasPrefix("#") || line.hasPrefix("!") || line.hasPrefix("[") { continue }
             let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
             if parts.isEmpty { continue }
-            var host = parts.last ?? ""
+            // The first token is the entry. `parts.last` used to take a
+            // trailing comment token, so "example.com # tracker" blocked
+            // "tracker" and left the real name unfiltered.
+            var host = parts[0]
             if parts.count >= 2, (parts[0] == "0.0.0.0" || parts[0] == "127.0.0.1" || parts[0] == "::1") {
                 host = parts[1]
             }
@@ -137,7 +198,10 @@ final class BlocklistManager: @unchecked Sendable {
             host = host.lowercased()
             if host.contains("/") { continue }
             if host == "localhost" || host == "0.0.0.0" || host == "broadcasthost" { continue }
-            if host.isEmpty { continue }
+            if host.isEmpty || host.utf8.count > 253 { continue }
+            // Control characters never belong in a name, and a feed is
+            // untrusted input that later reaches logs and the UI.
+            if host.utf8.contains(where: { $0 < 0x21 || $0 == 0x7F }) { continue }
             out.insert(host)
         }
         return out

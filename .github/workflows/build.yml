@@ -6,13 +6,19 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: neither job writes to the repository, so the token gets no
+# more than read access even on a push to main. Unpinned tooling then runs with
+# a token that cannot push.
+permissions:
+  contents: read
+
 jobs:
   firewall-safety:
     name: Firewall safety audit
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The audit searches the sources with ripgrep, which the Ubuntu
       # runner image does not ship.
@@ -27,7 +33,7 @@ jobs:
     runs-on: macos-26
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install XcodeGen
         run: brew install xcodegen

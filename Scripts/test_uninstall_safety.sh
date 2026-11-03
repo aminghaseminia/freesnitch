@@ -198,6 +198,25 @@ test_refuses_unexpected_path() {
   set -e
   (( status != 0 )) || fail "a system path was accepted as the test root"
   expect_contains "$output" "refusing a system path as the test root" "test root guard message"
+
+  # A path that RESOLVES to a system location must fail too. `/tmp/../..`
+  # passed the literal checks and derived the real /Applications and
+  # /Library paths this script deletes as root.
+  set +e
+  output="$(FREESNITCH_UNINSTALL_TEST_ROOT="/tmp/../.." bash -c 'source "$1"' _ "$UNINSTALL" 2>&1)"
+  status=$?
+  set -e
+  (( status != 0 )) || fail "a root resolving through .. was accepted"
+  expect_contains "$output" "refusing a system path as the test root" "test root guard message for a .. path"
+
+  # The same, reached through a symlink.
+  ln -s / "$root/escape"
+  set +e
+  output="$(FREESNITCH_UNINSTALL_TEST_ROOT="$root/escape" bash -c 'source "$1"' _ "$UNINSTALL" 2>&1)"
+  status=$?
+  set -e
+  (( status != 0 )) || fail "a symlink to / was accepted as the test root"
+  expect_contains "$output" "refusing a system path as the test root" "test root guard message for a symlink"
 }
 
 # --- 2. it refuses to remove the app while the helper still runs ------------

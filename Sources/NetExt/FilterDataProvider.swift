@@ -167,6 +167,10 @@ final class FilterDataProvider: NEFilterDataProvider {
     private let matcher = RuleMatcher()
     private let resolverBypass = ResolverBypass()
     private let bundleIdentifierCache = BundleIdentifierCache()
+    /// Signed bundle identities, keyed by executable path. Guarded because the
+    /// verdict path runs on multiple queues.
+    private let verifiedIdentifierLock = NSLock()
+    private var verifiedIdentifierCache: [String: String] = [:]
     private let snapshotLock = NSLock()
     private var snapshot: SharedRuleBridge.Snapshot?
     /// The evaluation order derived from `snapshot`. Ordering per flow repeated
@@ -562,12 +566,17 @@ final class FilterDataProvider: NEFilterDataProvider {
         let attributes = [kSecGuestAttributePid as String: pid] as CFDictionary
         guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
               let code else { return false }
-        let requirementText = [AppConstants.bundleIdGUI, AppConstants.bundleIdCLI, AppConstants.bundleIdHelper, AppConstants.bundleIdNetExt]
-            .map { "identifier \"\($0)\"" }
-            .joined(separator: " or ")
-        var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
-              let requirement else { return false }
+        // The shared requirement keeps the anchor and team clauses that make
+        // this an identity check rather than a string match. Without them any
+        // local process could ad-hoc sign itself with our bundle identifier
+        // (`codesign -s - --identifier io.isaaclins.freesnitch`) and be
+        // exempted from filtering before the matcher ever ran.
+        guard let requirement = XPCPeerValidator.requirement(forIdentifiers: [
+            AppConstants.bundleIdGUI,
+            AppConstants.bundleIdCLI,
+            AppConstants.bundleIdHelper,
+            AppConstants.bundleIdNetExt
+        ]) else { return false }
         return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
@@ -575,8 +584,42 @@ final class FilterDataProvider: NEFilterDataProvider {
         ip.hasPrefix("127.") || ip == "::1" || ip == "localhost"
     }
 
-    /// DHCP and DHCPv6 remain exempt for every policy state, as they are in
-    /// the pf anchor (issue #186). Port 53 is exempt only
+    /// DHCP and DHCPv6 must survive every policy, because a denied lease is a
+    /// network outage the user cannot click their way out of. The old test was
+    /// `remotePort in {67, 68, 546, 547}`, which exempted any flow to any host
+    /// on those ports: a malicious app could reach an attacker server on 546
+    /// and bypass silent-deny, explicit deny rules and alerts alike.
+    ///
+    /// Scope the exemption to the actual protocol exchange. When the local port
+    /// is known, only the 67/68 and 546/547 pairs qualify. When it is not, an
+    /// outbound flow must target the DHCP broadcast or multicast address, and
+    /// an inbound flow must come from a DHCP server port.
+    private func isDHCP(_ conn: Connection) -> Bool {
+        let ports = [conn.localPort, conn.remotePort].filter { $0 > 0 }.sorted()
+        if ports.count == 2, ports == [67, 68] || ports == [546, 547] {
+            return true
+        }
+
+        let isIPv4Bootstrap = conn.remoteIP == "255.255.255.255" || conn.remoteIP == "0.0.0.0"
+        let isIPv6Bootstrap = conn.remoteIP.lowercased().hasPrefix("ff02::")
+        switch conn.direction {
+        case .outgoing:
+            switch conn.remotePort {
+            case 67: return isIPv4Bootstrap || conn.remoteIP.isEmpty
+            case 547: return isIPv6Bootstrap || conn.remoteIP.isEmpty
+            default: return false
+            }
+        case .incoming:
+            // A server reply to a lease or renewal. The client side is the
+            // local port, which the matcher does not have a rule for.
+            return conn.remotePort == 67 || conn.remotePort == 547
+        case .any:
+            return false
+        }
+    }
+
+    /// DNS stays exempt only in the narrow boot window described below, as it
+    /// is in the pf anchor (issue #186). Port 53 is exempt only
     /// while a valid helper boot snapshot is active, and only for a configured
     /// resolver. If resolver configuration is unavailable during that boot
     /// window, ResolverBypass fails open so name resolution still works.
@@ -588,7 +631,7 @@ final class FilterDataProvider: NEFilterDataProvider {
     /// wildcard is never a configured resolver, so such a flow keeps exactly
     /// the answer it received before the destination was recorded honestly.
     private func isDNSOrDHCP(_ conn: Connection, snapshotOrigin: SnapshotOrigin) -> Bool {
-        if [67, 68, 546, 547].contains(conn.remotePort) { return true }
+        if isDHCP(conn) { return true }
         guard conn.remotePort == 53, snapshotOrigin == .boot else { return false }
         let lookup = conn.remoteIP.isEmpty ? FlowDestination.unspecifiedLookupToken : conn.remoteIP
         return resolverBypass.allowsDNS(to: lookup)
@@ -617,11 +660,21 @@ final class FilterDataProvider: NEFilterDataProvider {
         let path = pid > 0 ? pathForPID(pid) : ""
         let name = path.isEmpty ? "Unknown" : (path as NSString).lastPathComponent
         let metadata = bundleIdentifierCache.cachedMetadata(forExecutablePath: path)
+        // Rules may only match a bundle identity that the code signature
+        // vouches for. CFBundleIdentifier in a plist is attacker-controlled for
+        // an unsigned or ad-hoc binary (`codesign -s - --identifier ...`), so
+        // the plist value is used for version display only.
+        let processBundleId = verifiedBundleIdentifier(
+            auditToken: flow.sourceAppAuditToken,
+            pid: pid,
+            path: path
+        )
         return Connection(
             pid: Int32(pid),
             processName: name,
             processPath: path,
-            processBundleId: metadata?.bundleIdentifier,
+            processBundleId: processBundleId,
+            localPort: localPort(of: flow),
             remoteHost: remoteHost,
             remoteIP: remoteIP,
             remotePort: port,
@@ -649,6 +702,60 @@ final class FilterDataProvider: NEFilterDataProvider {
         }
         let legacy = flow.remoteEndpoint as? NWHostEndpoint
         return (legacy?.hostname ?? "", Int(legacy?.port ?? "0") ?? 0)
+    }
+
+    /// The local port of a flow. It is what distinguishes a DHCP exchange from
+    /// an arbitrary connection to a DHCP port, so the exemption cannot be
+    /// claimed by a client that merely targets 67/547.
+    private func localPort(of flow: NEFilterSocketFlow) -> Int {
+        if #available(macOS 15.0, *), case let .hostPort(_, port) = flow.localFlowEndpoint {
+            return Int(port.rawValue)
+        }
+        return Int((flow.localEndpoint as? NWHostEndpoint)?.port ?? "") ?? 0
+    }
+
+    /// The bundle identifier a rule may trust: the signed code identifier, and
+    /// only when the signature chains to Apple. Unsigned and ad-hoc binaries
+    /// are answered nil, so a bundle-id allow rule cannot be borrowed by an app
+    /// that merely writes the same string into its Info.plist. Cached by
+    /// executable path because the identity is stable for that path.
+    private func verifiedBundleIdentifier(auditToken: Data?, pid: Int, path: String) -> String? {
+        guard pid > 0, !path.isEmpty else { return nil }
+        verifiedIdentifierLock.lock()
+        let cached = verifiedIdentifierCache[path]
+        verifiedIdentifierLock.unlock()
+        if let cached { return cached }
+
+        guard let auditToken, auditToken.count >= MemoryLayout<audit_token_t>.size else { return nil }
+        var code: SecCode?
+        let attributes = [kSecGuestAttributeAudit as String: auditToken] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+              let code else { return nil }
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString("anchor apple generic" as CFString, [], &requirement) == errSecSuccess,
+              let requirement,
+              SecCodeCheckValidity(code, [], requirement) == errSecSuccess else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &info
+        ) == errSecSuccess,
+              let dict = info as? [String: Any],
+              let identifier = dict[kSecCodeInfoIdentifier as String] as? String else {
+            return nil
+        }
+
+        verifiedIdentifierLock.lock()
+        if verifiedIdentifierCache.count >= 512 {
+            verifiedIdentifierCache.removeAll(keepingCapacity: true)
+        }
+        verifiedIdentifierCache[path] = identifier
+        verifiedIdentifierLock.unlock()
+        return identifier
     }
 
     private func auditTokenToPID(_ data: Data) -> Int? {

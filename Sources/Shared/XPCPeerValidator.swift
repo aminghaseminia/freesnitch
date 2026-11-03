@@ -6,11 +6,17 @@ import Security
 /// extension so their trust boundary cannot drift.
 public enum XPCPeerValidator {
     /// The only application identities permitted to use the privileged XPC
-    /// surfaces in a Developer ID build. Keep this allowlist here, rather than
-    /// copying a code requirement into each listener.
+    /// surfaces. Keep this allowlist here, rather than copying a code
+    /// requirement into each listener.
+    ///
+    /// The CLI is deliberately absent. It is a world-executable binary with no
+    /// authentication of its own, so trusting it made any local process - not
+    /// the human - the authority behind a system-wide firewall: an unprivileged
+    /// process could run `freesnitch enforcement off --yes` or point the root
+    /// DNS proxy at its own DoH upstream. Privileged mutations are the GUI's
+    /// job because only the GUI is launched and driven by the logged-in user.
     public static let permittedPeerIdentifiers: [String] = [
-        AppConstants.bundleIdGUI,
-        AppConstants.bundleIdCLI
+        AppConstants.bundleIdGUI
     ]
 
     /// Return true only for the signed FreeSnitch GUI or CLI. Ad-hoc/local
@@ -48,10 +54,13 @@ public enum XPCPeerValidator {
     /// listeners. Keep this in shared code so the helper and extension cannot
     /// silently accept different client identities.
     private static func peerRequirement() -> SecRequirement? {
-        requirement(for: permittedPeerIdentifiers)
+        requirement(forIdentifiers: permittedPeerIdentifiers)
     }
 
-    private static func requirement(for identifiers: [String]) -> SecRequirement? {
+    /// Builds the Apple-anchored, team-pinned requirement for a set of bundle
+    /// identifiers. Public so the extension's own-traffic exemption uses the
+    /// same requirement instead of a second copy that can drift.
+    public static func requirement(forIdentifiers identifiers: [String]) -> SecRequirement? {
         let identifierClause = identifiers
             .map { "identifier \"\($0)\"" }
             .joined(separator: " or ")
@@ -75,7 +84,12 @@ public enum XPCPeerValidator {
             // so treat it as hostile rather than waving every client through.
             return false
         case .success(let team) where team == nil:
-            return true
+            // An ad-hoc build has no team to pin, so the requirement above
+            // would accept any process that claims the identifier string.
+            // Restrict the development exemption to the GUI inside this same
+            // bundle: another binary cannot put itself there without write
+            // access to the app being trusted.
+            return adHocPeerIsOurGUI(connection)
         case .success:
             break
         }
@@ -83,6 +97,31 @@ public enum XPCPeerValidator {
         guard let code = guestCode(for: connection),
               let requirement else { return false }
         return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    /// Development-only exemption for an unsigned app. Both halves of the
+    /// comparison are real bundle identities on disk, not identifiers a caller
+    /// can choose.
+    private static func adHocPeerIsOurGUI(_ connection: NSXPCConnection) -> Bool {
+        guard identifier(of: connection) == AppConstants.bundleIdGUI,
+              let peerApp = containingApp(of: connection),
+              let selfApp = AppBundleIdentity.containingAppURL else { return false }
+        return peerApp.resolvingSymlinksInPath().standardizedFileURL.path
+            == selfApp.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    /// The .app that contains the peer executable, read from its code object so
+    /// a reused pid cannot substitute another process.
+    private static func containingApp(of connection: NSXPCConnection) -> URL? {
+        guard let code = guestCode(for: connection) else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var path: CFURL?
+        guard SecCodeCopyPath(staticCode, [], &path) == errSecSuccess, let path else {
+            return nil
+        }
+        return AppBundleIdentity.containingAppURL(for: path as URL)
     }
 
     private static func guestCode(for connection: NSXPCConnection) -> SecCode? {

@@ -222,6 +222,12 @@ public enum RuleExportCodec {
                     id: id,
                     reason: reason + ". In the file, set its \"enabled\" to false, or give it a \"processPath\" or \"processBundleId\"")
             }
+            if rule.hasNoSelector {
+                throw RuleExportError.invalidRule(
+                    id: id,
+                    reason: "the rule names no process and no destination, so it would match all traffic"
+                        + ". Add a \"processBundleId\", \"processPath\", \"processName\", \"remoteHost\", \"remoteIP\" or \"remotePort\"")
+            }
             for (label, value) in [("profile", rule.profile as String?),
                                    ("process bundle id", rule.processBundleId),
                                    ("process path", rule.processPath),

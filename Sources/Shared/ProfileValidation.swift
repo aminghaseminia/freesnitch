@@ -108,9 +108,16 @@ public enum GatewayMAC {
             guard groups.count == 3, groups.allSatisfy({ $0.utf8.count == 4 }) else {
                 throw GatewayMACError.wrongShape
             }
-            octets = groups.flatMap { group in
-                let chars = Array(group)
-                return [String(chars[0...1]), String(chars[2...3])]
+            octets = groups.flatMap { group -> [String] in
+                // Index the UTF-8 bytes, not the Character array: a group of
+                // two multi-byte characters passes the four-byte check and then
+                // traps on chars[2...3].
+                let bytes = Array(group.utf8)
+                guard bytes.count == 4 else { return [] }
+                return [
+                    String(decoding: bytes[0..<2], as: UTF8.self),
+                    String(decoding: bytes[2..<4], as: UTF8.self)
+                ]
             }
         } else {
             guard value.utf8.count == 12 else { throw GatewayMACError.wrongShape }

@@ -11,6 +11,11 @@ public enum DoHUpstreamValidator {
         guard let url = URL(string: value) else { return "the value is not a URL" }
         guard url.scheme?.lowercased() == "https" else { return "the URL scheme must be https" }
         guard let host = url.host, !host.isEmpty else { return "the URL must include a host" }
+        // A user:token@ pair would be echoed by `freesnitch status` and stored
+        // in plaintext in the policy database, so it is not a supported shape.
+        guard url.user == nil && url.password == nil else {
+            return "the URL must not embed credentials"
+        }
         return nil
     }
 }

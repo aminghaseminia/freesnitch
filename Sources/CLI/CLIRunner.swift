@@ -971,18 +971,37 @@ final class CLIRunner {
         return report.rules.map(humanRule).joined(separator: "\n\n")
     }
 
+    /// Rule and connection fields are attacker-influenced: a rules file can be
+    /// imported, and a process name or hostname comes from the network. Control
+    /// characters would let them drive the terminal (ANSI/OSC), so they are
+    /// replaced before anything is printed.
+    private func sanitized(_ value: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in value.unicodeScalars {
+            if scalar.properties.generalCategory == .control || scalar.value == 0x7F,
+               let replacement = Unicode.Scalar(0x3F) {
+                scalars.append(replacement)
+            } else {
+                scalars.append(scalar)
+            }
+        }
+        return String(scalars)
+    }
+
     private func humanRule(_ rule: Rule) -> String {
         let process = rule.processName ?? rule.processBundleId ?? rule.processPath ?? "Any Process"
         let destination = rule.remoteHost ?? rule.remoteIP ?? "Any destination"
         let port = rule.remotePort.map { ":\($0)" } ?? ""
-        return "\(rule.id.uuidString)  \(rule.enabled ? "enabled" : "disabled")  \(rule.action.rawValue)\n  \(process) -> \(destination)\(port)\n  direction=\(rule.direction.rawValue) scope=\(rule.scope.rawValue) priority=\(rule.priority) profile=\(rule.profile)\n  group=\(rule.groupName ?? "-") temporary=\(rule.temporary ? "yes" : "no") hits=\(rule.hitCount)\n  created=\(formatDate(rule.createdAt))\(rule.expiresAt.map { " expires=\(formatDate($0))" } ?? "")\(rule.notes.map { "\n  notes=\($0)" } ?? "")"
+        let group = rule.groupName.map { sanitized($0) } ?? "-"
+        let notes = rule.notes.map { sanitized($0) } ?? ""
+        return "\(rule.id.uuidString)  \(rule.enabled ? "enabled" : "disabled")  \(rule.action.rawValue)\n  \(sanitized(process)) -> \(sanitized(destination))\(port)\n  direction=\(rule.direction.rawValue) scope=\(rule.scope.rawValue) priority=\(rule.priority) profile=\(rule.profile)\n  group=\(group) temporary=\(rule.temporary ? "yes" : "no") hits=\(rule.hitCount)\n  created=\(formatDate(rule.createdAt))\(rule.expiresAt.map { " expires=\(formatDate($0))" } ?? "")\(notes.isEmpty ? "" : "\n  notes=\(notes)")"
     }
 
     private func humanConnections(_ report: ConnectionsReport, title: String = "Connections") -> String {
         if report.connections.isEmpty { return "\(title): none." }
         return "\(title) (\(report.returned), limit \(report.requestedLimit))\n" + report.connections.map { connection in
             let destination = connection.remoteHost.isEmpty ? connection.remoteIP : connection.remoteHost
-            return "  \(connection.processName) [pid \(connection.pid)] -> \(destination):\(connection.remotePort) \(connection.status.rawValue) in=\(connection.bytesIn) out=\(connection.bytesOut)"
+            return "  \(sanitized(connection.processName)) [pid \(connection.pid)] -> \(sanitized(destination)):\(connection.remotePort) \(connection.status.rawValue) in=\(connection.bytesIn) out=\(connection.bytesOut)"
         }.joined(separator: "\n")
     }
 

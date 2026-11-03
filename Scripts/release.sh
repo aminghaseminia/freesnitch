@@ -20,6 +20,11 @@ APP_PROFILE_NAME="FreeSnitch App DeveloperID 2026"
 NETEXT_PROFILE_NAME="FreeSnitch NetExt DeveloperID 2026"
 NOTARY_PROFILE="${NOTARY_PROFILE:-puresnitch-dev}"
 SPARKLE_VERSION="2.10.1"
+# SHA-256 of Sparkle-${SPARKLE_VERSION}.tar.xz, computed from the official
+# GitHub release asset. This tarball is executed while the Developer ID identity
+# and the Sparkle EdDSA private key are in use, so its hash is pinned rather
+# than trusted to TLS alone. Change both values together.
+SPARKLE_TARBALL_SHA256="1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27"
 SPARKLE_ACCOUNT="puresnitch"
 FEED_URL="https://isaaclins.com/freesnitch/appcast.xml"
 DOWNLOAD_PAGE_URL="https://github.com/isaaclins/freesnitch/releases/latest"
@@ -575,6 +580,13 @@ sparkle_tool() {
   printf 'Downloading Sparkle %s tools...\n' "$SPARKLE_VERSION" >&2
   curl -fsSL -o "$tarball" \
     "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+  # The downloaded tools run with the signing identity and the update private
+  # key available. A checksum is the only thing that turns "GitHub served it
+  # over HTTPS" into an integrity check on the artifact itself.
+  local downloaded_sha
+  downloaded_sha="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+  [[ "$downloaded_sha" == "$SPARKLE_TARBALL_SHA256" ]] || \
+    die "Sparkle tool tarball checksum mismatch: expected $SPARKLE_TARBALL_SHA256, got $downloaded_sha. Delete $tarball and retry, and treat the download as untrusted."
   tar -xf "$tarball" -C "$sparkle_dir"
   for candidate in \
     "$sparkle_dir/Sparkle-${SPARKLE_VERSION}/bin/generate_appcast" \

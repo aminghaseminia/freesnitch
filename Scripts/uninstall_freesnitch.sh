@@ -77,12 +77,28 @@ assert_test_root() {
   [[ "$root" == /* ]] || die "the test root must be an absolute path: $root"
   [[ "$root" != */ ]] || die "the test root must not end in a slash: $root"
   [[ -d "$root" ]] || die "the test root does not exist: $root"
-  case "$root" in
-    /|/Applications|/Library|/System|/usr|/bin|/sbin|/etc|/var|/Users|/opt|/private)
-      die "refusing a system path as the test root: $root"
+  # Canonicalize before judging. The literal checks below missed `..` and
+  # symlinks, so `/tmp/../..` passed them and derived the real
+  # /Applications/FreeSnitch.app and /Library/Application Support paths that
+  # this script deletes as root.
+  local canonical
+  canonical="$(cd "$root" 2>/dev/null && pwd -P)" || \
+    die "the test root cannot be resolved: $root"
+  case "$canonical" in
+    /|/Applications|/Library|/System|/usr|/bin|/sbin|/etc|/var|/Users|/opt|/private|/private/var|/private/tmp|/tmp)
+      die "refusing a system path as the test root: $root (resolves to $canonical)"
       ;;
   esac
-  [[ "$root" == */* && "${root#/}" == */* ]] || die "refusing a top-level test root: $root"
+  local protected
+  for protected in /Applications /Library /System /usr /bin /sbin /etc /var /Users /opt /private; do
+    case "$protected" in
+      "$canonical"/*)
+        die "the test root contains a system path: $root (resolves to $canonical)"
+        ;;
+    esac
+  done
+  [[ "$canonical" == */* && "${canonical#/}" == */* ]] || \
+    die "refusing a top-level test root: $root"
 }
 
 if [[ -n "$TEST_ROOT" ]]; then

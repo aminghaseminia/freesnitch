@@ -1,5 +1,12 @@
 # FreeSnitch CLI
 
+> **Privileged CLI access was removed in this fork.** The helper now accepts only
+> the FreeSnitch app as an XPC peer. The CLI binary is world-executable and needs
+> no authentication, so trusting its signature let any local process run
+> `freesnitch enforcement off --yes`, point the root DNS proxy at another DoH
+> upstream, or flush the pf rules. Commands that need the helper report the
+> removal and direct you to the app. See `XPCPeerValidator.permittedPeerIdentifiers`.
+
 The CLI is the terminal surface for the same helper and network extension used by
 FreeSnitch. The executable is shipped inside the application bundle:
 

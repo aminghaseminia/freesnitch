@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Owns the pending DNS "ask" decisions that sit between the DNS proxy and the
@@ -210,9 +211,22 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
 
     init(listener: NSXPCListener) throws {
         let dbDir = "/Library/Application Support/FreeSnitch"
-        try? FileManager.default.createDirectory(atPath: dbDir, withIntermediateDirectories: true)
+        // The policy database holds rules, profile names, blocklist choices,
+        // the DoH upstream and connection history. Root's default umask would
+        // create it 0644 in a 0755 directory, readable by every local account,
+        // so the mode is set explicitly here and on the sidecar files SQLite
+        // writes beside it. InsightsStore does the same.
+        try? FileManager.default.createDirectory(
+            atPath: dbDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        _ = chmod(dbDir, 0o700)
         let dbPath = (dbDir as NSString).appendingPathComponent("freesnitch.sqlite")
         self.store = try RuleStore(path: dbPath)
+        _ = chmod(dbPath, 0o600)
+        _ = chmod(dbPath + "-wal", 0o600)
+        _ = chmod(dbPath + "-shm", 0o600)
         self.insights = try? InsightsStore()
         if self.insights == nil {
             PSLog.error(PSLog.helper, "Insights store failed to open; observation recording is unavailable.")
@@ -760,6 +774,13 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         }
         if let reason = rule.nameOnlyRejectionReason {
             return "Refused: \(reason)."
+        }
+        // The matcher returns true when every selector is nil, and its
+        // name-only guard exempts the DNS pseudo-process, so a rule with no
+        // selector at all is a silent allow-all or deny-all. Reject it on
+        // every ingest path.
+        if rule.hasNoSelector {
+            return "Refused: a rule must name at least one process or destination selector."
         }
         return nil
     }

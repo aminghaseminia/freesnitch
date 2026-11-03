@@ -760,7 +760,8 @@ final class GeoIndex: @unchecked Sendable {
                                            placeCount: Int(header.placeCount),
                                            countryCount: Int(header.countryCount),
                                            nameBytes: Int(header.nameBytes))
-        guard Int(header.totalBytes) == size, layout.totalBytes == size else {
+        guard let declaredBytes = Int(exactly: header.totalBytes),
+              declaredBytes == size, layout.totalBytes == size else {
             throw reject("the index is truncated or padded: header says \(header.totalBytes), layout says \(layout.totalBytes), file is \(size)")
         }
 

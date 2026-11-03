@@ -531,10 +531,15 @@ require_text "$PEER_VALIDATOR" "kSecGuestAttributePid" \
   "the shared XPC peer validator has no pid fallback"
 require_text "$PEER_VALIDATOR" "SecCodeCheckValidity" \
   "the shared XPC peer validator does not check the code requirement"
-require_text "$PEER_VALIDATOR" "AppConstants.bundleIdCLI" \
-  "the shared XPC peer validator does not explicitly allow the bundled CLI"
 require_text "$PEER_VALIDATOR" "permittedPeerIdentifiers" \
-  "the GUI and CLI peer identities are not held in one validator allowlist"
+  "the GUI peer identity is not held in one validator allowlist"
+require_text "$PEER_VALIDATOR" "AppConstants.bundleIdGUI" \
+  "the GUI bundle identifier is missing from the peer validator allowlist"
+# The CLI is a world-executable, unauthenticated binary. Trusting it as an XPC
+# peer let any local process disable the firewall or replace its DoH upstream.
+if grep -Fq 'AppConstants.bundleIdCLI,' "$PEER_VALIDATOR"; then
+  fail "the CLI is trusted as a privileged XPC peer, so any local process can drive the helper"
+fi
 require_text "$CLI_HELPER" "options: [.privileged]" \
   "the CLI helper client is not using the privileged launchd lookup"
 require_text "$CLI_HELPER" "HelperBridge.remoteInterface()" \

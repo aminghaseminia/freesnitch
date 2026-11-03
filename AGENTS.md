@@ -88,7 +88,7 @@ process, and `xcodebuild` fails outright.
 | `Sources/Helper` | Root launchd daemon: `PFManager` (writes `/etc/pf.anchors/puresnitch`, runs `pfctl`), `DNSProxy` (DNS on 127.0.0.1:53 + DoH upstream), `NetMonitor` (parses `nettop`/`lsof`), `BlocklistManager`, `RuleStore` (SQLite), `HelperService` (XPC listener) |
 | `Sources/Shared` | Compiled into every target: `HelperProtocol` (XPC contract), `Models`, `RuleStore`, `RuleMatcher`, `WireCodec`, `RuleTransport`, `Profile*`, `IPGeo`, `Logger` |
 | `Sources/NetExt` | `NEFilterDataProvider` content filter for the firewall flavour |
-| `Sources/CLI` | `freesnitch` CLI, shipped at `Contents/Helpers/freesnitch`. Keep the binary inside the bundle: its signature and identifier are part of the XPC trust boundary |
+| `Sources/CLI` | `freesnitch` CLI, shipped at `Contents/Helpers/freesnitch`. Keep the binary inside the bundle: its signature and identifier are part of the XPC trust boundary. **It is not a trusted XPC peer** (see invariants): privileged commands now direct the user to the app |
 | `Scripts/` | `test_*.sh` harnesses, `audit_firewall_safety.sh`, `release.sh`, `screenshots.sh`, `make_icon.sh`, uninstallers |
 | `docs/` | `architecture.md`, `CLI.md`, `NETWORK-EXTENSION.md`, `ci-and-releases.md`, GitHub Pages site (`index.html`) |
 
@@ -126,6 +126,12 @@ Allow/Deny sheet in Alert mode. See `docs/architecture.md` for the diagrams.
 8. **The helper runs as root.** Anything it reads from the GUI is untrusted
    input: validate paths, hosts and URLs (`PFHostValidator`,
    `DoHUpstreamValidator`, `ProfileValidation` exist for this).
+9. **Never add the CLI (or another local binary) to the helper's peer
+   allowlist.** `XPCPeerValidator.permittedPeerIdentifiers` is GUI-only on
+   purpose: a world-executable, unauthenticated CLI as a trusted peer let any
+   local process disable enforcement or replace the DoH upstream. For the same
+   reason, code-signature exemptions need `anchor apple generic` plus the team
+   check, never a bare `identifier` match.
 
 ---
 

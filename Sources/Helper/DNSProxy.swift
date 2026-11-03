@@ -182,6 +182,16 @@ final class DNSProxy: @unchecked Sendable {
 
     // MARK: - UDP path
     private func handleUDP(_ conn: NWConnection) {
+        // The proxy answers 127.0.0.1:53 for the machine's own resolver, as the
+        // README and architecture document promise. Without this check the
+        // listener's wildcard bind made it an open resolver for the whole LAN:
+        // usable for UDP reflection/amplification, for consuming the user's DoH
+        // upstream, and for triggering Allow/Deny prompts remotely.
+        guard isLoopbackPeer(conn.endpoint) else {
+            PSLog.error(PSLog.dns, "SECURITY: dropped a DNS query from a non-loopback peer")
+            conn.cancel()
+            return
+        }
         conn.start(queue: queue)
         receiveUDP(conn)
     }
@@ -199,8 +209,30 @@ final class DNSProxy: @unchecked Sendable {
 
     // MARK: - TCP path
     private func handleTCP(_ conn: NWConnection) {
+        guard isLoopbackPeer(conn.endpoint) else {
+            PSLog.error(PSLog.dns, "SECURITY: dropped a DNS-over-TCP connection from a non-loopback peer")
+            conn.cancel()
+            return
+        }
         conn.start(queue: queue)
         readTCP(conn, accumulated: Data())
+    }
+
+    /// Only the machine itself may use the proxy. The listener binds every
+    /// interface because the resolver is configured per-machine, so the filter
+    /// lives here rather than in the bind address.
+    private func isLoopbackPeer(_ endpoint: NWEndpoint) -> Bool {
+        switch endpoint {
+        case let .hostPort(host, _):
+            switch host {
+            case .ipv4(let address): return address == .loopback
+            case .ipv6(let address): return address == .loopback
+            case .name(let name, _): return name == "localhost"
+            @unknown default: return false
+            }
+        default:
+            return false
+        }
     }
     private func readTCP(_ conn: NWConnection, accumulated: Data) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65535) { [weak self] data, _, _, _ in

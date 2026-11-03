@@ -28,36 +28,16 @@ final class CLIHelperClient: NSObject {
     private let timeout: TimeInterval = 15
 
     func prepare(timeout: TimeInterval = 15) async throws -> HelperStatus {
-        let version = try await perform(timeout: timeout) { proxy, reply in
-            proxy.getVersion(reply: reply)
-        }
-        observedVersion = version
-        guard !version.isEmpty else {
-            throw CLIError(.helperUnreachable,
-                           message: "The FreeSnitch helper answered with an empty version.",
-                           remediation: "Run `freesnitch settings helper recheck`, then approve FreeSnitch in System Settings > General > Login Items & Extensions.")
-        }
-        guard AppConstants.identityMatches(reported: version, expected: CLIAppBundle.expectedBuildIdentity) else {
-            throw CLIError(.helperVersionMismatch,
-                           message: "The helper process is running version \(version), but the installed app is version \(CLIAppBundle.expectedBuildIdentity). Helper-side fixes in the installed build are not active.",
-                           remediation: "The helper is still running from an earlier build. Do not unregister it. Run `\(AppConstants.helperKickstartCommand)` while launchd still has the service registered, then rerun the command.",
-                           observedHelperVersion: version)
-        }
-        let data: Data = try await perform(timeout: timeout) { proxy, reply in
-            proxy.getStatus(reply: reply)
-        }
-        guard !data.isEmpty else {
-            throw CLIError(.helperUnreachable,
-                           message: "The helper returned an empty status response.",
-                           remediation: "Run `freesnitch settings helper recheck` and inspect the helper logs.")
-        }
-        do {
-            return try FreeSnitchWireCodec.decode(HelperStatus.self, from: data)
-        } catch {
-            throw CLIError(.operationFailed,
-                           message: "The helper returned a status payload this CLI could not decode: \(error.localizedDescription).",
-                           remediation: "Use matching FreeSnitch app and helper versions, then run `freesnitch doctor`.")
-        }
+        // The helper no longer accepts the CLI as an XPC peer. It has to be
+        // denied in XPCPeerValidator, not here: trusting the CLI meant any
+        // local process could run it and disable the firewall or replace the
+        // root DNS proxy's DoH upstream with no authentication. Fail fast with
+        // that reason instead of waiting out a connection timeout.
+        throw CLIError(
+            .helperUnreachable,
+            message: "The FreeSnitch CLI cannot reach the privileged helper. Privileged CLI access was removed.",
+            remediation: "The helper only accepts the FreeSnitch app as a peer, because a world-executable CLI let any local process change firewall policy. Use the app for enforcement, rules, DoH and PF changes."
+        )
     }
 
     func setMode(_ mode: AppMode) async throws {

@@ -201,6 +201,18 @@ extension Rule {
         return name != Connection.dnsLookupProcessName
     }
 
+    /// True when the rule names no process and no destination. The compiled
+    /// matcher returns true when every selector is nil, so such a rule matches
+    /// all traffic: an imported rule file could add a wildcard allow (or deny)
+    /// that only reads as "any process to any destination" afterwards.
+    public var hasNoSelector: Bool {
+        let hasProcess = [processBundleId, processPath, processName]
+            .contains { ($0 ?? "").isEmpty == false }
+        let hasDestination = [remoteHost, remoteIP]
+            .contains { ($0 ?? "").isEmpty == false } || (remotePort ?? 0) != 0
+        return !hasProcess && !hasDestination
+    }
+
     /// Why an enabled name-only rule may not enter the policy. A disabled one
     /// matches nothing, and refusing it would stop the user from turning an
     /// existing one off.
@@ -239,7 +251,7 @@ fileprivate struct PreparedRule: Sendable {
     func matches(connection: Connection, address: PreparedConnectionAddress) -> Bool {
         if let direction, direction != connection.direction { return false }
         if let processBundleId, (connection.processBundleId ?? "") != processBundleId { return false }
-        if let processPath, !connection.processPath.hasPrefix(processPath) { return false }
+        if let processPath, !RuleMatcher.pathMatches(connection.processPath, rulePath: processPath) { return false }
         if let remotePort, connection.remotePort != remotePort { return false }
         if let remoteHost, !remoteHost.matches(connection.remoteHost) { return false }
         if let remoteIP, !remoteIP.matches(rawIP: connection.remoteIP, parsed: address) { return false }
@@ -311,13 +323,25 @@ public struct RuleMatcher: Sendable {
         }
     }
 
+    /// A rule path matches the process itself or anything inside it as a path
+    /// component, never a sibling that merely shares a prefix. A bare
+    /// `hasPrefix` let a rule for `/Applications/Safari.app` also match
+    /// `/Applications/Safari.app.evil/...`, which is a different app at a path
+    /// a user can write to.
+    static func pathMatches(_ candidate: String, rulePath: String) -> Bool {
+        guard !rulePath.isEmpty else { return true }
+        if candidate == rulePath { return true }
+        let prefix = rulePath.hasSuffix("/") ? rulePath : rulePath + "/"
+        return candidate.hasPrefix(prefix)
+    }
+
     public func matches(rule r: Rule, connection c: Connection) -> Bool {
         if r.direction != .any && r.direction != c.direction { return false }
         if let bid = r.processBundleId, !bid.isEmpty {
             if (c.processBundleId ?? "") != bid { return false }
         }
         if let path = r.processPath, !path.isEmpty {
-            if c.processPath != path && !c.processPath.hasPrefix(path) { return false }
+            if !Self.pathMatches(c.processPath, rulePath: path) { return false }
         }
         if let port = r.remotePort, port != 0 {
             if c.remotePort != port { return false }

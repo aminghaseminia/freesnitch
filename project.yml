@@ -58,7 +58,12 @@ targets:
         LSUIElement: true
         NSHumanReadableCopyright: "© 2026 FreeSnitch contributors. MIT License."
         NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+          # Cleartext is not needed anywhere: blocklists and the DoH upstream
+          # are https-only, and profile URLs may use http only for loopback,
+          # which NSAllowsLocalNetworking covers. Arbitrary loads used to be on
+          # app-wide, which would have silently permitted a future cleartext
+          # URLSession call.
+          NSAllowsLocalNetworking: true
         # Only used to place the "your Mac" node on the connection map. The
         # map degrades to endpoints without lines when this is refused.
         NSLocationWhenInUseUsageDescription: "FreeSnitch shows your Mac on the connection map so you can see where your traffic goes."

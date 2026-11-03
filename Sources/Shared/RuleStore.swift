@@ -846,6 +846,27 @@ public final class RuleStore: @unchecked Sendable {
         }
     }
 
+    /// Every stored domain for one list, used to keep blocking intact when a
+    /// refresh fails: a feed that could not be downloaded must not silently
+    /// remove the entries the previous successful download installed.
+    public func blocklistDomainSet(blocklistID: UUID) -> Set<String> {
+        queue.sync {
+            var out: Set<String> = []
+            var stmt: OpaquePointer?
+            defer { if stmt != nil { sqlite3_finalize(stmt) } }
+            guard sqlite3_prepare_v2(db, "SELECT domain FROM blocklist_entries WHERE blocklist_id=?;", -1, &stmt, nil) == SQLITE_OK else {
+                return out
+            }
+            sqlite3_bind_text(stmt, 1, blocklistID.uuidString, -1, SQLITE_TRANSIENT)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let text = sqlite3_column_text(stmt, 0) {
+                    out.insert(String(cString: text))
+                }
+            }
+            return out
+        }
+    }
+
     /// One bounded page of a list, optionally filtered. The caller's limit is
     /// clamped here as well as at the transport, because this is the layer that
     /// knows the query runs against hundreds of thousands of rows.
@@ -854,7 +875,11 @@ public final class RuleStore: @unchecked Sendable {
                                  offset: Int,
                                  limit: Int) -> (entries: [String], total: Int) {
         let bounded = min(max(limit, 1), BlocklistEntryQuery.maximumLimit)
-        let start = max(offset, 0)
+        // Clamped here, at the layer that builds the SQL, because
+        // sqlite3_bind_int traps on a value outside Int32: an offset from an
+        // XPC request used to crash the root helper, and a helper restart
+        // clears the pf anchor.
+        let start = min(max(offset, 0), Int(Int32.max) - bounded - 1)
         let needle = String(search.trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .prefix(BlocklistEntryQuery.maximumSearchLength))
