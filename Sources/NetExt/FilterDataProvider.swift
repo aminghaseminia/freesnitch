@@ -303,7 +303,12 @@ final class FilterDataProvider: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        guard let socketFlow = flow as? NEFilterSocketFlow else { return .allow() }
+        guard let socketFlow = flow as? NEFilterSocketFlow else {
+            // A content filter has no rules for a non-socket flow. Allow it by
+            // default, or drop it when the user asked for fail-closed.
+            if failClosedEnabled { return .drop() }
+            return .allow()
+        }
         let conn = connection(from: socketFlow)
         // The compact evidence event is still created before any verdict work:
         // FlowObservation(connection: conn)
@@ -324,9 +329,9 @@ final class FilterDataProvider: NEFilterDataProvider {
         // the snapshot and its boot/live origin must come from one locked read.
         guard let snapshot = policy.snapshot else {
             // No GUI-delivered policy is a degraded state, not an alert-mode
-            // policy. Allowing here keeps a missing GUI from becoming a network
-            // outage while the published status tells the UI that filtering is
-            // not ready.
+            // policy. The default keeps a missing GUI from becoming a network
+            // outage; fail-closed drops the flow instead.
+            if failClosedEnabled { return .drop() }
             return .allow()
         }
         switch matcher.decision(for: conn, prepared: policy.prepared, defaultMode: snapshot.mode) {
@@ -522,7 +527,8 @@ final class FilterDataProvider: NEFilterDataProvider {
 
     private func promptAndResume(flow: NEFilterFlow, conn: Connection) {
         guard let data = try? JSONEncoder().encode(conn) else {
-            resumeFlow(flow, with: NEFilterNewFlowVerdict.allow()); return
+            resumeFlow(flow, with: failClosedEnabled ? NEFilterNewFlowVerdict.drop() : NEFilterNewFlowVerdict.allow())
+            return
         }
         var settled = false
         let lock = NSLock()
@@ -538,12 +544,23 @@ final class FilterDataProvider: NEFilterDataProvider {
             resumeOnce(allow ? NEFilterNewFlowVerdict.allow() : NEFilterNewFlowVerdict.drop())
         }
         if !asked {
-            // No GUI connected: fail open so the user's network keeps working.
-            resumeOnce(NEFilterNewFlowVerdict.allow())
+            // No GUI connected. Fail open by default so the user's network
+            // keeps working; fail-closed drops the flow instead.
+            if failClosedEnabled {
+                resumeOnce(NEFilterNewFlowVerdict.drop())
+            } else {
+                resumeOnce(NEFilterNewFlowVerdict.allow())
+            }
             return
         }
         // Safety net: never hold a flow forever if the GUI never answers.
-        workQueue.asyncAfter(deadline: .now() + askTimeout) { resumeOnce(NEFilterNewFlowVerdict.allow()) }
+        workQueue.asyncAfter(deadline: .now() + askTimeout) {
+            if self.failClosedEnabled {
+                resumeOnce(NEFilterNewFlowVerdict.drop())
+            } else {
+                resumeOnce(NEFilterNewFlowVerdict.allow())
+            }
+        }
     }
 
     // MARK: - Self exemption
@@ -557,12 +574,29 @@ final class FilterDataProvider: NEFilterDataProvider {
         // The flow's own identity comes from the audit token, not from a pid
         // that could be reused between the flow and this check.
         if isOwnCode(auditToken: auditToken) { return true }
-        // nettop and lsof are Apple-signed binaries in /usr, so they can only be
-        // recognised as ours through the helper that spawned them. The kernel
-        // gives no audit token for the parent here, so this lookup stays pid
-        // based and the signature requirement is what makes it meaningful.
-        guard let parent = parentPID(of: conn.pid), parent > 0 else { return false }
-        return isOwnCode(pid: parent)
+        // nettop and lsof are Apple-signed and live under /usr/sbin. They are
+        // identified by their own audit token and signed path, not by asking
+        // who their parent is: the parent lookup was a pid-reuse race.
+        return isObservationTool(auditToken: auditToken)
+    }
+
+    private func isObservationTool(auditToken: Data?) -> Bool {
+        guard let path = signedExecutablePath(auditToken: auditToken) else { return false }
+        return path == "/usr/sbin/nettop" || path == "/usr/sbin/lsof"
+    }
+
+    private func signedExecutablePath(auditToken: Data?) -> String? {
+        guard let auditToken, auditToken.count >= MemoryLayout<audit_token_t>.size else { return nil }
+        var code: SecCode?
+        let attributes = [kSecGuestAttributeAudit as String: auditToken] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+              let code else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var path: CFURL?
+        guard SecCodeCopyPath(staticCode, [], &path) == errSecSuccess, let path else { return nil }
+        return (path as URL).path
     }
 
     private func isOwnCode(auditToken: Data?) -> Bool {
@@ -580,23 +614,11 @@ final class FilterDataProvider: NEFilterDataProvider {
         return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
-    private func isOwnCode(pid: Int32) -> Bool {
-        var code: SecCode?
-        let attributes = [kSecGuestAttributePid as String: pid] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
-              let code else { return false }
-        // The shared requirement keeps the anchor and team clauses that make
-        // this an identity check rather than a string match. Without them any
-        // local process could ad-hoc sign itself with our bundle identifier
-        // (`codesign -s - --identifier io.isaaclins.freesnitch`) and be
-        // exempted from filtering before the matcher ever ran.
-        guard let requirement = XPCPeerValidator.requirement(forIdentifiers: [
-            AppConstants.bundleIdGUI,
-            AppConstants.bundleIdCLI,
-            AppConstants.bundleIdHelper,
-            AppConstants.bundleIdNetExt
-        ]) else { return false }
-        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    /// The user's fail-closed choice, shared through the app group. Read on
+    /// the verdict path: CFPreferences serves it from memory and UserDefaults
+    /// is thread-safe.
+    private var failClosedEnabled: Bool {
+        UserDefaults(suiteName: AppConstants.appGroup)?.bool(forKey: AppPreferences.Key.failClosed) ?? false
     }
 
     private func isLoopback(_ ip: String) -> Bool {
@@ -654,15 +676,6 @@ final class FilterDataProvider: NEFilterDataProvider {
         guard conn.remotePort == 53, snapshotOrigin == .boot else { return false }
         let lookup = conn.remoteIP.isEmpty ? FlowDestination.unspecifiedLookupToken : conn.remoteIP
         return resolverBypass.allowsDNS(to: lookup)
-    }
-
-    private func parentPID(of pid: Int32) -> Int32? {
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        let result = sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0)
-        guard result == 0, size > 0 else { return nil }
-        return info.kp_eproc.e_ppid
     }
 
     // MARK: - Flow -> Connection

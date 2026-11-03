@@ -1,5 +1,10 @@
 # AGENTS.md
 
+> This fork has no self-updater and no upstream update trust. Sparkle, its feed
+> and its public key were removed on purpose: a fork cannot safely consume an
+> appcast signed by another project's key. Do not reintroduce an update feed
+> without this fork's own EdDSA key pair.
+
 Guidance for AI agents (and humans) working on FreeSnitch. Read the "Build" and
 "Invariants" sections before changing anything: several failure modes here are
 silent at build time and fatal at launch.

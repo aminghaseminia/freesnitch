@@ -1,5 +1,11 @@
 # CI and releases
 
+> **Fork note.** This fork removed the Sparkle dependency, the appcast feed and
+> the update public key. `Scripts/release.sh` still contains the upstream
+> maintainer's notarization and appcast steps; they are not used here and will
+> fail without that team's Developer ID profiles and EdDSA private key. Build
+> with the commands in `AGENTS.md` and distribute manually.
+
 ## CI
 
 The GitHub Actions workflow runs `Scripts/audit_firewall_safety.sh` on every

@@ -20,6 +20,13 @@ public enum AppPreferences {
         /// uses. Off by default, which is the settled #26 behaviour, but it is
         /// now a stated choice instead of a silent one (#130).
         public static let askKnownContacts = "PSAskAboutKnownContacts"
+        /// Block instead of allow when the extension has no policy, an ask
+        /// cannot reach a user, or a flow is not a socket flow. Off by default:
+        /// fail-open is the documented contract, because a firewall that locks
+        /// the user out of their own network is worse than one that misses a
+        /// decision. Shared through the app group so the sandboxed extension
+        /// can read the same value.
+        public static let failClosed = "PSFailClosed"
     }
 
     public static var defaults: UserDefaults {
@@ -34,6 +41,23 @@ public enum AppPreferences {
 
     public static func bool(forKey key: String) -> Bool {
         defaults.bool(forKey: key)
+    }
+
+    /// The app-group suite shared with the network extension. The extension is
+    /// sandboxed under its own bundle identifier, so it cannot read the GUI's
+    /// own domain; this suite is the one place both can see.
+    public static var sharedGroupDefaults: UserDefaults? {
+        UserDefaults(suiteName: AppConstants.appGroup)
+    }
+
+    /// Read by the extension, written by the GUI's Settings page.
+    public static var failClosed: Bool {
+        get { sharedGroupDefaults?.bool(forKey: Key.failClosed) ?? false }
+        set {
+            sharedGroupDefaults?.set(newValue, forKey: Key.failClosed)
+            sharedGroupDefaults?.synchronize()
+            postChange(key: Key.failClosed, value: newValue, notify: true)
+        }
     }
 
     public static func string(forKey key: String) -> String? {

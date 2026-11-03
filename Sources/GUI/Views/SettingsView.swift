@@ -120,6 +120,12 @@ struct SettingsView: View {
                             .font(.caption).foregroundColor(.secondary)
                     }
                 }
+                Section("When FreeSnitch cannot decide") {
+                    Toggle("Block traffic instead of allowing it (fail-closed)",
+                           isOn: $state.failClosed)
+                    Text("Off by default. On drops a flow when the rule engine has no policy yet, when an alert times out or no window can answer it, and for non-socket flows. It can cut off network access while the helper is not running.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
                 // Every failure path in the app writes here: a rejected mode
                 // change, a remembered rule the helper refused, a connection
                 // allowed without asking. Nothing rendered it, so all of that
@@ -409,9 +415,8 @@ struct SettingsView: View {
                 .accessibilityHidden(true)
             Text("FreeSnitch").font(.title.bold())
             Text("Version \(AppConstants.version)").font(.subheadline).foregroundColor(.secondary)
-            UpdaterSettingsView()
             Text("Open-source application firewall for macOS.").font(.caption).foregroundColor(.secondary)
-            Link("github.com/isaaclins/freesnitch", destination: URL(string: "https://github.com/isaaclins/freesnitch")!)
+            Link("github.com/aminghaseminia/freesnitch", destination: URL(string: "https://github.com/aminghaseminia/freesnitch")!)
                 .font(.caption)
             Text("MIT License · © 2026 FreeSnitch contributors")
                 .font(.caption2).foregroundColor(.secondary)

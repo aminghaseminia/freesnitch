@@ -120,6 +120,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Mirror of the app-group preference the network extension reads. Off by
+    /// default: fail-open is the documented contract, but the user can choose
+    /// to drop traffic the firewall could not decide about.
+    @Published var failClosed: Bool = AppPreferences.failClosed {
+        didSet {
+            guard !applyingExternalPreferences else { return }
+            AppPreferences.failClosed = failClosed
+        }
+    }
+
     /// Info.plist declares LSUIElement, so the app starts without a Dock icon
     /// and this is what puts one there. Leaving accessory mode deactivates
     /// the app, which would drop the Settings window the switch was flipped
@@ -307,6 +317,7 @@ final class AppState: ObservableObject {
         showDockIcon = AppPreferences.defaults.object(forKey: AppPreferences.Key.showDockIcon) as? Bool ?? true
         enforcementEnabled = AppPreferences.bool(forKey: AppPreferences.Key.enforcement)
         askAboutKnownContacts = AppPreferences.bool(forKey: AppPreferences.Key.askKnownContacts)
+        failClosed = AppPreferences.failClosed
         let externalMode = AppPreferences.string(forKey: AppPreferences.Key.mode).flatMap(AppMode.init(rawValue:))
         applyingExternalPreferences = false
 

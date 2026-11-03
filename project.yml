@@ -34,11 +34,10 @@ fileGroups:
   - Resources
   - Scripts
 
-packages:
-  Sparkle:
-    url: https://github.com/sparkle-project/Sparkle
-    exactVersion: 2.10.1
-
+# No self-updater. This fork ships no Sparkle feed or signing key of its own,
+# and inheriting upstream's would let the upstream project (or anyone who
+# obtains its EdDSA private key) deliver code to this build. Updates are a
+# deliberate manual action until this fork has its own key.
 targets:
   FreeSnitch:
     type: application
@@ -69,11 +68,7 @@ targets:
         NSLocationWhenInUseUsageDescription: "FreeSnitch shows your Mac on the connection map so you can see where your traffic goes."
         NSPrincipalClass: NSApplication
         LSApplicationCategoryType: public.app-category.utilities
-        SUFeedURL: "https://isaaclins.com/freesnitch/appcast.xml"
-        SUPublicEDKey: "s19KDKXgrxZQgfYO2yymuly/OjXMOpCpwqsIvVebbfU="
-        SUEnableAutomaticChecks: true
-        SUScheduledCheckInterval: 86400
-        SUAllowsAutomaticUpdates: false
+        SUEnableAutomaticChecks: false
     entitlements:
       path: Sources/GUI/FreeSnitch.entitlements
       properties:
@@ -145,7 +140,6 @@ targets:
             echo "warning: CLI binary not found, skipping embed"
           fi
     dependencies:
-      - package: Sparkle
       - target: FreeSnitchHelper
         embed: false
         link: false

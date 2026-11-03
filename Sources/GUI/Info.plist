@@ -37,15 +37,7 @@
 	<string>FreeSnitch shows your Mac on the connection map so you can see where your traffic goes.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>SUAllowsAutomaticUpdates</key>
-	<false/>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://isaaclins.com/freesnitch/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>s19KDKXgrxZQgfYO2yymuly/OjXMOpCpwqsIvVebbfU=</string>
-	<key>SUScheduledCheckInterval</key>
-	<integer>86400</integer>
+	<false/>
 </dict>
 </plist>

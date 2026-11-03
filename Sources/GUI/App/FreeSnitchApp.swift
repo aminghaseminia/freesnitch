@@ -4,7 +4,6 @@ import AppKit
 @main
 struct FreeSnitchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    private let sparkleUpdater = SparkleUpdaterController.shared
 
     /// Command-1 for the first sidebar row, and so on. Beyond nine there is no
     /// digit left to press, so those pages keep the menu item without a
@@ -24,8 +23,6 @@ struct FreeSnitchApp: App {
         }
         .commands {
             CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: sparkleUpdater.updater)
-                Divider()
                 // Positional, not mnemonic: these switch between sidebar
                 // pages, and every Mac app with a sidebar or tabs binds that to
                 // Command-1 through Command-n. Letter mnemonics belong to
