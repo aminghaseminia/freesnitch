@@ -313,7 +313,7 @@ final class FilterDataProvider: NEFilterDataProvider {
         // FreeSnitch must never hold up its own traffic. The helper shells out
         // to nettop and lsof to observe connections, and pausing those to ask
         // the user deadlocks the app that is supposed to answer the question.
-        if isOwnTraffic(conn) || isLoopback(conn.remoteIP) { return .allow() }
+        if isOwnTraffic(conn, auditToken: socketFlow.sourceAppAuditToken) || isLoopback(conn.remoteIP) { return .allow() }
         // Decided once, before any rule is consulted: a flow can reach this
         // point with no destination at all, and that limitation is reported
         // rather than hidden behind a wildcard address.
@@ -552,13 +552,32 @@ final class FilterDataProvider: NEFilterDataProvider {
     /// /Library/SystemExtensions/<uuid>/, nowhere near the app bundle, so
     /// deriving "our directory" from Bundle.main is wrong: walking up from the
     /// staged copy lands on "/" and would exempt every process on the machine.
-    private func isOwnTraffic(_ conn: Connection) -> Bool {
+    private func isOwnTraffic(_ conn: Connection, auditToken: Data?) -> Bool {
         guard conn.pid > 0 else { return false }
-        if isOwnCode(pid: conn.pid) { return true }
+        // The flow's own identity comes from the audit token, not from a pid
+        // that could be reused between the flow and this check.
+        if isOwnCode(auditToken: auditToken) { return true }
         // nettop and lsof are Apple-signed binaries in /usr, so they can only be
-        // recognised as ours through the helper that spawned them.
+        // recognised as ours through the helper that spawned them. The kernel
+        // gives no audit token for the parent here, so this lookup stays pid
+        // based and the signature requirement is what makes it meaningful.
         guard let parent = parentPID(of: conn.pid), parent > 0 else { return false }
         return isOwnCode(pid: parent)
+    }
+
+    private func isOwnCode(auditToken: Data?) -> Bool {
+        guard let auditToken, auditToken.count >= MemoryLayout<audit_token_t>.size else { return false }
+        var code: SecCode?
+        let attributes = [kSecGuestAttributeAudit as String: auditToken] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+              let code,
+              let requirement = XPCPeerValidator.requirement(forIdentifiers: [
+                  AppConstants.bundleIdGUI,
+                  AppConstants.bundleIdCLI,
+                  AppConstants.bundleIdHelper,
+                  AppConstants.bundleIdNetExt
+              ]) else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
     private func isOwnCode(pid: Int32) -> Bool {

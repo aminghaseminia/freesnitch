@@ -341,9 +341,17 @@ final class PFManager: @unchecked Sendable {
         if entries.count < set.acceptedEntryCount {
             lines.append("# Truncated to \(entries.count) of \(set.acceptedEntryCount) entries by the anchor size bound.")
         }
-        lines.append("pass out quick proto { tcp udp } to any port 53")
-        lines.append("pass out quick proto { tcp udp } to any port { 67 68 }")
-        lines.append("pass out quick proto { tcp udp } to any port { 546 547 }")
+        // DNS and DHCP stay ahead of the feeds, but only at the destinations
+        // those protocols actually use. The old lines passed *any* host on
+        // ports 53/67/68/546/547, so a blocklisted endpoint listening on one
+        // of them was reachable no matter what the feed said. Configured
+        // resolvers are emitted individually below.
+        lines.append("pass out quick proto { tcp udp } to 127.0.0.1")
+        lines.append("pass out quick inet6 proto { tcp udp } to ::1")
+        lines.append("pass out quick proto udp to 255.255.255.255 port { 67 68 }")
+        lines.append("pass out quick proto udp to 0.0.0.0 port { 67 68 }")
+        lines.append("pass out quick inet6 proto udp to ff02::/16 port { 546 547 }")
+        lines.append("pass out quick inet6 proto udp to fe80::/10 port { 546 547 }")
         for resolver in resolverAddresses {
             // A resolver address arrives from system configuration, so it is
             // validated exactly like any other destination before it can

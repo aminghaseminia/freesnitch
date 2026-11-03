@@ -572,9 +572,9 @@ public struct IPBlocklistPolicy: Sendable {
     /// per-flow context.
     public func verdict(remoteIP: String, remotePort: Int, isOwnTraffic: Bool) -> IPBlocklistVerdict {
         guard let address = IPBlocklistAddress.parse(remoteIP) else {
-            return enforcementEnabled && Self.infrastructurePorts.contains(remotePort)
-                ? .exemptInfrastructurePort
-                : (enforcementEnabled ? .allowed : .notEnforced)
+            // An address that cannot be parsed cannot be shown to be a
+            // bootstrap destination, so it gets no infrastructure exemption.
+            return enforcementEnabled ? .allowed : .notEnforced
         }
         return verdict(address: address, remotePort: remotePort, isOwnTraffic: isOwnTraffic)
     }
@@ -590,9 +590,32 @@ public struct IPBlocklistPolicy: Sendable {
         guard enforcementEnabled else { return .notEnforced }
         if isOwnTraffic { return .exemptOwnTraffic }
         if Self.isLoopback(address) { return .exemptLoopback }
-        if Self.infrastructurePorts.contains(remotePort) { return .exemptInfrastructurePort }
+        if Self.infrastructurePorts.contains(remotePort), Self.isBootstrapDestination(address) {
+            return .exemptInfrastructurePort
+        }
         if resolvers.contains(address) { return .exemptResolver }
         return blocked.contains(address) ? .blocked : .allowed
+    }
+
+    /// The addresses DHCP and DHCPv6 use before an interface has a lease:
+    /// unspecified, broadcast, link-local and multicast. The port alone is not
+    /// enough. Exempting every destination on 53/67/68/546/547 let a
+    /// feed-listed host stay reachable by listening on one of those ports.
+    private static func isBootstrapDestination(_ value: IPBlocklistAddress.Value) -> Bool {
+        if let v4 = value.ipv4 {
+            if (v4 >> 24) == 0 { return true }              // 0.0.0.0/8
+            if (v4 >> 16) == 0xA9FE { return true }         // 169.254.0.0/16
+            if (v4 >> 28) == 0xE { return true }            // 224.0.0.0/4
+            if v4 == 0xFFFF_FFFF { return true }            // limited broadcast
+            return false
+        }
+        if let v6 = value.ipv6 {
+            let top16 = UInt16(truncatingIfNeeded: v6.upper >> 48)
+            if (0xFF00...0xFFFF).contains(top16) { return true }   // ff00::/8
+            if (0xFE80...0xFEBF).contains(top16) { return true }   // fe80::/10
+            if v6.upper == 0 && v6.lower == 0 { return true }      // ::
+        }
+        return false
     }
 
     public func isBlocked(remoteIP: String, remotePort: Int, isOwnTraffic: Bool) -> Bool {

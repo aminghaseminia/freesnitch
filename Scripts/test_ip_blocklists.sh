@@ -163,9 +163,15 @@ struct IPBlocklistHarness {
         checks.expect(policy.verdict(remoteIP: "0:0:0:0:0:0:0:1", remotePort: 443, isOwnTraffic: false) == .exemptLoopback,
                       "expanded IPv6 loopback must never be blocked by a feed")
         for dnsOrDHCPPort in [53, 67, 68, 546, 547] {
-            checks.expect(policy.verdict(remoteIP: "203.0.113.9", remotePort: dnsOrDHCPPort, isOwnTraffic: false) == .exemptInfrastructurePort,
-                          "port \(dnsOrDHCPPort) carries DNS or DHCP and must never be blocked by a feed")
+            checks.expect(policy.verdict(remoteIP: "203.0.113.9", remotePort: dnsOrDHCPPort, isOwnTraffic: false) == .blocked,
+                          "a feed-listed host on infrastructure port \(dnsOrDHCPPort) must still be blocked")
         }
+        checks.expect(policy.verdict(remoteIP: "255.255.255.255", remotePort: 67, isOwnTraffic: false) == .exemptInfrastructurePort,
+                      "the DHCP broadcast destination must be exempt")
+        checks.expect(policy.verdict(remoteIP: "ff02::1:2", remotePort: 547, isOwnTraffic: false) == .exemptInfrastructurePort,
+                      "the DHCPv6 multicast destination must be exempt")
+        checks.expect(policy.verdict(remoteIP: "fe80::1", remotePort: 546, isOwnTraffic: false) == .exemptInfrastructurePort,
+                      "a link-local DHCPv6 peer must be exempt")
         checks.expect(policy.verdict(remoteIP: "9.9.9.9", remotePort: 443, isOwnTraffic: false) == .exemptResolver,
                       "a configured resolver must never be blocked by a feed, on any port")
         checks.expect(policy.verdict(remoteIP: "2606:4700:4700::1111", remotePort: 443, isOwnTraffic: false) == .exemptResolver,
@@ -200,14 +206,18 @@ struct IPBlocklistHarness {
         checks.expect(anchor.contains("table <freesnitch_ipblock> persist {"), "the anchor must render the feed as one pf table")
         checks.expect(anchor.contains("block out quick proto { tcp udp } to <freesnitch_ipblock>"),
                       "the anchor must block traffic to the feed table")
-        checks.expect(anchor.contains("pass out quick proto { tcp udp } to any port 53"), "the anchor must pass DNS ahead of the feed")
-        checks.expect(anchor.contains("pass out quick proto { tcp udp } to any port { 67 68 }"), "the anchor must pass DHCP ahead of the feed")
+        checks.expect(anchor.contains("pass out quick proto { tcp udp } to 127.0.0.1"), "the anchor must pass loopback DNS ahead of the feed")
+        checks.expect(anchor.contains("to 255.255.255.255 port { 67 68 }"), "the anchor must pass DHCP broadcast ahead of the feed")
+        checks.expect(!anchor.contains("to any port 53"), "the anchor must not exempt every host on port 53")
         checks.expect(anchor.contains("pass out quick to 9.9.9.9"), "the anchor must pass the configured resolver ahead of the feed")
         checks.expect(anchor.contains("203.0.113.9"), "the anchor table must carry the feed entry")
+        // The protected addresses are about the feed table. The DHCP pass
+        // lines legitimately name the broadcast and link-local destinations.
+        let tableLine = anchor.split(separator: "\n").first(where: { $0.hasPrefix("table <freesnitch_ipblock>") }).map(String.init) ?? ""
         for refused in ["127.0.0.0/8", "10.0.0.0/8", "169.254.0.0/16", "224.0.0.4", "255.255.255.255", "fe80::/10"] {
-            checks.expect(!anchor.contains(refused), "the anchor must never carry \(refused)")
+            checks.expect(!tableLine.contains(refused), "the feed table must never carry \(refused)")
         }
-        let passIndex = anchor.range(of: "pass out quick proto { tcp udp } to any port 53")?.lowerBound
+        let passIndex = anchor.range(of: "pass out quick proto { tcp udp } to 127.0.0.1")?.lowerBound
         let blockIndex = anchor.range(of: "block out quick proto { tcp udp } to <freesnitch_ipblock>")?.lowerBound
         checks.expect(passIndex != nil && blockIndex != nil && passIndex! < blockIndex!,
                       "the DNS and DHCP passes must precede the feed block, since every rule here is quick")

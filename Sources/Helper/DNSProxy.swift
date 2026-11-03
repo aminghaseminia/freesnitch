@@ -71,6 +71,8 @@ struct DNSPolicy: Sendable {
 final class DNSProxy: @unchecked Sendable {
     private var udpListener: NWListener?
     private var tcpListener: NWListener?
+    private var udp6Listener: NWListener?
+    private var tcp6Listener: NWListener?
     private let queue = DispatchQueue(label: "io.isaaclins.freesnitch.dns", qos: .userInitiated)
     private let upstreamQueue = DispatchQueue(label: "io.isaaclins.freesnitch.dns.up")
     /// Backstop timers only. Kept off `queue` so a pending ask can never wait
@@ -147,12 +149,11 @@ final class DNSProxy: @unchecked Sendable {
     func start(port: UInt16 = 53) throws {
         if running { return }   // already listening; avoid re-binding port 53
         self.port = port
-        let params = NWParameters.udp
-        params.allowLocalEndpointReuse = true
         guard let p = NWEndpoint.Port(rawValue: port) else {
             throw NSError(domain: "DNSProxy", code: 1, userInfo: [NSLocalizedDescriptionKey: "bad port"])
         }
-        let udp = try NWListener(using: params, on: p)
+
+        let udp = try makeListener(NWParameters.udp, label: "UDP", port: p)
         udp.newConnectionHandler = { [weak self] conn in self?.handleUDP(conn) }
         udp.stateUpdateHandler = { [weak self] state in
             if case let .failed(err) = state {
@@ -163,20 +164,53 @@ final class DNSProxy: @unchecked Sendable {
         udp.start(queue: queue)
         self.udpListener = udp
 
-        let tparams = NWParameters.tcp
-        tparams.allowLocalEndpointReuse = true
-        let tcp = try NWListener(using: tparams, on: p)
+        let tcp = try makeListener(NWParameters.tcp, label: "TCP", port: p)
         tcp.newConnectionHandler = { [weak self] conn in self?.handleTCP(conn) }
         tcp.start(queue: queue)
         self.tcpListener = tcp
 
+        // The machine's resolver is configured to 127.0.0.1, but a network or
+        // a user can point it at ::1. Best effort: a refused IPv6 bind must not
+        // take down the IPv4 proxy.
+        let udp6 = try? makeListener(NWParameters.udp, label: "UDP-IPv6", port: p, host: .ipv6(.loopback))
+        udp6?.newConnectionHandler = { [weak self] conn in self?.handleUDP(conn) }
+        udp6?.start(queue: queue)
+        self.udp6Listener = udp6
+
+        let tcp6 = try? makeListener(NWParameters.tcp, label: "TCP-IPv6", port: p, host: .ipv6(.loopback))
+        tcp6?.newConnectionHandler = { [weak self] conn in self?.handleTCP(conn) }
+        tcp6?.start(queue: queue)
+        self.tcp6Listener = tcp6
+
         running = true
-        PSLog.info(PSLog.dns, "dns proxy listening on \(port) (udp+tcp)")
+        PSLog.info(PSLog.dns, "dns proxy listening on 127.0.0.1:\(port) (udp+tcp)")
+    }
+
+    /// Bind loopback, not the wildcard address. The README promises
+    /// `127.0.0.1:53`; a wildcard listener made the proxy an open resolver for
+    /// the whole LAN. If the platform refuses the requiredLocalEndpoint form,
+    /// fall back to a wildcard listener, whose peer filter in handleUDP and
+    /// handleTCP still drops every non-loopback client.
+    private func makeListener(_ parameters: NWParameters,
+                              label: String,
+                              port: NWEndpoint.Port,
+                              host: NWEndpoint.Host = .ipv4(.loopback)) throws -> NWListener {
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
+        if let listener = try? NWListener(using: parameters) {
+            return listener
+        }
+        PSLog.error(PSLog.dns, "loopback-only \(label) bind was refused; using a filtered wildcard listener")
+        let wildcard = label.hasPrefix("UDP") ? NWParameters.udp : NWParameters.tcp
+        wildcard.allowLocalEndpointReuse = true
+        return try NWListener(using: wildcard, on: port)
     }
 
     func stop() {
         udpListener?.cancel(); tcpListener?.cancel()
+        udp6Listener?.cancel(); tcp6Listener?.cancel()
         udpListener = nil; tcpListener = nil
+        udp6Listener = nil; tcp6Listener = nil
         running = false
     }
 

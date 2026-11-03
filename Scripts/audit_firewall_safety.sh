@@ -664,7 +664,7 @@ fi
 
 # FreeSnitch, its helper, and loopback are safety-critical exemptions. They
 # must be decided before the general matcher can pause or drop the flow.
-own_line="$(grep -nF 'if isOwnTraffic(conn) || isLoopback(conn.remoteIP) { return .allow() }' "$FILTER" | head -1 | cut -d: -f1 || true)"
+own_line="$(grep -nF 'if isOwnTraffic(conn, auditToken: socketFlow.sourceAppAuditToken) || isLoopback(conn.remoteIP) { return .allow() }' "$FILTER" | head -1 | cut -d: -f1 || true)"
 matcher_line="$(grep -nF 'matcher.decision(for: conn' "$FILTER" | head -1 | cut -d: -f1 || true)"
 [[ -n "$own_line" ]] || fail "own-traffic and loopback exemption is missing"
 [[ -n "$matcher_line" ]] || fail "the extension no longer invokes the shared matcher"
@@ -672,8 +672,10 @@ if (( own_line >= matcher_line )); then
   fail "own-traffic and loopback must be allowed before matcher.decision"
 fi
 
-require_text "$FILTER" "if isOwnCode(pid: conn.pid)" \
-  "own-traffic detection no longer checks the process code signature"
+require_text "$FILTER" "isOwnCode(auditToken: auditToken)" \
+  "own-traffic detection no longer resolves the flow's identity from its audit token"
+require_text "$FILTER" "kSecGuestAttributeAudit" \
+  "own-traffic detection no longer uses audit-token identity"
 require_text "$FILTER" "SecCodeCheckValidity" \
   "own-traffic detection no longer validates a code signature"
 require_text "$FILTER" "AppConstants.bundleIdGUI" \

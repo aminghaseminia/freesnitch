@@ -159,16 +159,33 @@ final class BlocklistManager: @unchecked Sendable {
     /// hostile feed from becoming an unbounded allocation.
     static let maximumFeedBytes = 32 * 1024 * 1024
 
-    /// The helper fetches as root, so it must not be pointed at the machine's
-    /// own services or the cloud metadata address.
+    /// The helper fetches as root, and a blocklist URL can arrive through an
+    /// imported profile as well as from the user. Refuse the machine's own
+    /// services, the LAN and the cloud metadata address so a profile cannot
+    /// turn the daemon into an internal HTTP client.
     private static func isForbiddenFetchHost(_ host: String?) -> Bool {
         guard let host = host?.lowercased(), !host.isEmpty else { return true }
         if host == "localhost" || host.hasSuffix(".localhost") { return true }
-        if host == "::1" || host == "0.0.0.0" { return true }
+        for suffix in [".local", ".internal", ".lan", ".home.arpa"] where host.hasSuffix(suffix) {
+            return true
+        }
+        if host.contains(":") {
+            if host == "::1" || host == "::" { return true }
+            if host.hasPrefix("fc") || host.hasPrefix("fd") { return true }          // fc00::/7
+            if host.hasPrefix("fe8") || host.hasPrefix("fe9")
+                || host.hasPrefix("fea") || host.hasPrefix("feb") { return true }    // fe80::/10
+            if host.hasPrefix("ff") { return true }                                   // ff00::/8
+            return false
+        }
         let octets = host.split(separator: ".").compactMap { Int($0) }
-        guard octets.count == 4 else { return false }
-        if octets[0] == 127 { return true }
-        if octets[0] == 169 && octets[1] == 254 { return true }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
+        let a = octets[0], b = octets[1]
+        if a == 0 || a == 10 || a == 127 { return true }              // this host, private
+        if a == 169 && b == 254 { return true }                        // link-local, metadata
+        if a == 172 && (16...31).contains(b) { return true }           // private
+        if a == 192 && b == 168 { return true }                        // private
+        if a == 100 && (64...127).contains(b) { return true }          // CGNAT
+        if a >= 224 { return true }                                    // multicast, reserved
         return false
     }
 
